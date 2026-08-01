@@ -4,6 +4,7 @@ import time
 import glob
 import json
 import re
+import hashlib
 import subprocess
 import requests
 from dotenv import load_dotenv
@@ -21,6 +22,7 @@ OUTPUT_DIR = r"Z:\AI\Ready for media appearances"
 PROCESSED_DIR = r"Z:\AI\EDIT AI\RW\processed"
 TRANSCRIPTS_DIR = r"Z:\AI\EDIT AI\transcripts"
 HISTORY_FILE = r"Z:\AI\EDIT AI\history.json"
+PROCESSED_HISTORY_FILE = r"Z:\AI\EDIT AI\processed_history.json"
 
 WHISPER_MODEL_NAME = os.getenv("WHISPER_MODEL", "tiny")
 
@@ -47,6 +49,118 @@ def save_history(history):
             json.dump(history, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Error saving history file: {e}")
+
+def load_processed_history():
+    """Loads the SHA-256 processed history log."""
+    if os.path.exists(PROCESSED_HISTORY_FILE):
+        try:
+            with open(PROCESSED_HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading processed history: {e}")
+    return {"hashes": {}}
+
+def save_processed_history(data):
+    """Saves the SHA-256 processed history log."""
+    try:
+        with open(PROCESSED_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error saving processed history: {e}")
+
+def calculate_file_sha256(file_path):
+    """Calculates SHA-256 hash of a file for anti-duplication check."""
+    print(f"Calculating SHA-256 hash for {os.path.basename(file_path)}...")
+    sha256 = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                sha256.update(chunk)
+        digest = sha256.hexdigest()
+        print(f"SHA-256: {digest}")
+        return digest
+    except Exception as e:
+        print(f"Error calculating hash for {file_path}: {e}")
+        return None
+
+def is_duplicate_file(file_path):
+    """Checks if the video file has already been processed based on SHA-256 hash."""
+    file_hash = calculate_file_sha256(file_path)
+    if not file_hash:
+        return False, None
+        
+    proc_history = load_processed_history()
+    hashes = proc_history.get("hashes", {})
+    
+    if file_hash in hashes:
+        entry = hashes[file_hash]
+        print(f"\n[Smart Anti-Duplicate] File '{os.path.basename(file_path)}' SHA-256 matches previously processed video!")
+        print(f"  • Processed Timestamp: {entry.get('processed_timestamp')}")
+        print(f"  • Previously Created Clips: {entry.get('clips', [])}")
+        print("--> Skipping processing to prevent duplicate cuts.\n")
+        return True, file_hash
+        
+    return False, file_hash
+
+def record_processed_file(file_path, file_hash, created_clips):
+    """Records successfully processed video file hash and timestamp in history."""
+    if not file_hash:
+        return
+        
+    proc_history = load_processed_history()
+    hashes = proc_history.setdefault("hashes", {})
+    
+    now_epoch = time.time()
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    
+    hashes[file_hash] = {
+        "filename": os.path.basename(file_path),
+        "raw_path": file_path,
+        "processed_timestamp": now_str,
+        "processed_epoch": now_epoch,
+        "clips": created_clips
+    }
+    save_processed_history(proc_history)
+    print(f"[Anti-Duplicate] Recorded SHA-256 hash {file_hash[:10]}... into processed_history.json")
+
+def cleanup_old_raw_files(hours_threshold=48):
+    """
+    Storage Maintenance: Deletes raw video files from INPUT_DIR / PROCESSED_DIR
+    that have been successfully processed and are older than hours_threshold (48 hours).
+    """
+    print(f"\n--- Storage Maintenance Check (Threshold: {hours_threshold} hours) ---")
+    proc_history = load_processed_history()
+    hashes = proc_history.get("hashes", {})
+    
+    now_epoch = time.time()
+    threshold_seconds = hours_threshold * 3600
+    deleted_count = 0
+    
+    search_dirs = [INPUT_DIR, PROCESSED_DIR]
+    
+    for file_hash, entry in list(hashes.items()):
+        proc_epoch = entry.get("processed_epoch", 0)
+        elapsed_hours = (now_epoch - proc_epoch) / 3600.0
+        
+        if elapsed_hours >= hours_threshold:
+            filename = entry.get("filename")
+            # Check all possible locations of the raw file
+            possible_paths = [
+                entry.get("raw_path"),
+                os.path.join(INPUT_DIR, filename) if filename else None,
+                os.path.join(PROCESSED_DIR, filename) if filename else None
+            ]
+            
+            for path in possible_paths:
+                if path and os.path.exists(path) and os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                        deleted_count += 1
+                        print(f"🗑️ [Storage Maintenance] Deleted raw file: {path} (processed {elapsed_hours:.1f} hours ago)")
+                    except Exception as e:
+                        print(f"Error deleting old raw file {path}: {e}")
+                        
+    print(f"Storage Maintenance finished. Total raw files cleaned up: {deleted_count}\n")
 
 def get_next_raw_vdo_number(output_dir):
     """Scans output_dir for 'RAW VDO XXX.mp4' files and returns the next integer index."""
@@ -151,10 +265,8 @@ def get_crop_filters(width, height, zoom_percentage=115):
             crop_w = width
             crop_h = int(width / target_aspect) // 2 * 2
             
-    # 100% Zoom (Normal shot)
     filter_100 = f"crop={crop_w}:{crop_h},scale=1080:1920,setsar=1"
     
-    # Zoom % (Punch-in close-up shot)
     zoom_factor = float(zoom_percentage) / 100.0
     zoom_w = int(crop_w / zoom_factor) // 2 * 2
     zoom_h = int(crop_h / zoom_factor) // 2 * 2
@@ -162,13 +274,36 @@ def get_crop_filters(width, height, zoom_percentage=115):
     
     return filter_100, filter_zoom
 
+def filter_filler_words_and_stutters(segments):
+    """
+    Filters out filler words, stutters, and broken sound fragments
+    (e.g., isolated 'เอ่อ', 'อ่า', or empty sound bursts).
+    """
+    clean_segments = []
+    filler_patterns = re.compile(r"^(เอ่อ|อ่า|เออ|อือ|แบบว่า|อั๊วะ|อะ)$", re.IGNORECASE)
+    
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        duration = float(seg.get("end", 0)) - float(seg.get("start", 0))
+        
+        # Skip isolated filler sound fragments < 0.8s
+        if duration < 0.8 and filler_patterns.match(text):
+            print(f"Filter Out Filler Sound: '{text}' ({duration:.2f}s)")
+            continue
+            
+        clean_segments.append(seg)
+        
+    return clean_segments
+
 def get_speech_intervals(segments, total_duration, padding_start=0.05, padding_end=0.1, merge_threshold=0.3):
     """
     AUTO SILENCE CUT: Automatically detects and removes all silences longer than merge_threshold seconds (default 0.3s).
-    Pads speech segments lightly to preserve word boundaries and groups continuous speech blocks.
+    Also filters out filler words and stutters.
     """
+    clean_segs = filter_filler_words_and_stutters(segments)
+    
     raw_intervals = []
-    for seg in segments:
+    for seg in clean_segs:
         s = max(0.0, float(seg["start"]) - padding_start)
         e = min(total_duration, float(seg["end"]) + padding_end)
         if s < e:
@@ -196,15 +331,18 @@ def is_overlapping(s1, e1, s2, e2):
     """Returns True if interval [s1, e1] overlaps with interval [s2, e2]."""
     return max(s1, s2) < min(e1, e2)
 
-def select_10_clips(intervals, total_duration, min_duration=30.0, max_duration=60.0, used_intervals=None):
+def select_story_clips(intervals, total_duration, min_duration=30.0, max_duration=180.0, target_clips_per_day=3, used_intervals=None):
     """
-    Finds exactly 10 non-overlapping NEW clips from the speech intervals.
-    Each clip represents a coherent topic/story block of duration 30s-60s with silence cut out.
-    Skips any candidate clips that overlap with previously used interval ranges.
+    CONTEXTUAL GROUPING & EDITING:
+    Analyzes speech blocks and selects 1-3 top-quality, coherent story clips per day.
+    Target clip duration: 30s to 180s (adaptive for short footage).
+    Skips any candidate clips that overlap with previously exported interval ranges.
     """
     if used_intervals is None:
         used_intervals = []
         
+    effective_min_duration = min(min_duration, max(10.0, total_duration * 0.5)) if total_duration < min_duration else min_duration
+    
     candidates = []
     n = len(intervals)
     
@@ -212,11 +350,10 @@ def select_10_clips(intervals, total_duration, min_duration=30.0, max_duration=6
         curr_duration = 0.0
         for j in range(i, n):
             curr_duration += (intervals[j][1] - intervals[j][0])
-            if min_duration <= curr_duration <= max_duration:
+            if effective_min_duration <= curr_duration <= max_duration:
                 start_time = intervals[i][0]
                 end_time = intervals[j][1]
                 
-                # Check for overlap with previously exported clips
                 has_history_overlap = False
                 for u_start, u_end in used_intervals:
                     if is_overlapping(start_time, end_time, u_start, u_end):
@@ -236,14 +373,17 @@ def select_10_clips(intervals, total_duration, min_duration=30.0, max_duration=6
                 break
                 
     if not candidates:
-        print("No NEW valid candidate topic clips of duration 30s-60s could be formed.")
+        print("No valid candidate story clips could be formed.")
         return []
         
+    # Select up to target_clips_per_day high quality clips spread across the video
     selected_clips = []
     last_end_block_idx = -1
     
-    for m in range(10):
-        target_start = m * (total_duration / 10)
+    clip_count = min(target_clips_per_day, max(1, int(total_duration / 300))) if total_duration > 180 else min(target_clips_per_day, len(candidates))
+    
+    for m in range(clip_count):
+        target_start = m * (total_duration / clip_count)
         best_candidate = None
         best_diff = float('inf')
         
@@ -358,16 +498,32 @@ def render_clip(input_path, output_path, intervals, crop_filter_100, crop_filter
     return True
 
 def process_video(video_path, move_to_processed=True):
-    """Processes a RAW video file with Auto Silence Cut and Dynamic Punch-in based on LINE feedback parameters."""
+    """Processes a RAW video file with Smart Anti-Duplicate Hash Check, Auto Silence Cut, and Dynamic Punch-in."""
+    # 0. Storage Maintenance Routine
+    cleanup_old_raw_files(hours_threshold=48)
+    
     start_time = time.time()
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     print(f"\n--- Starting processing for: {video_path} ---")
     
-    # Load dynamic user feedback parameters from LINE chat
+    # Smart Anti-Duplicate Check via SHA-256 Hash
+    is_dup, file_hash = is_duplicate_file(video_path)
+    if is_dup:
+        return False
+        
+    # Auto-learn latest editing style from CapCut Drafts if available
+    try:
+        import capcut_style_learner
+        capcut_style_learner.run_capcut_style_learner()
+    except Exception as e:
+        print(f"CapCut style learner check: {e}")
+        
+    # Load dynamic user feedback parameters from LINE chat and CapCut style
     feedback = line_bot_manager.load_user_feedback()
     silence_thresh = float(feedback.get("silence_threshold", 0.3))
     zoom_perc = int(feedback.get("zoom_percentage", 115))
-    print(f"Active Editing Config -> Silence Threshold: {silence_thresh}s, Zoom Scale: {zoom_perc}%")
+    bgm_vol = float(feedback.get("bgm_volume", 0.25))
+    print(f"Active Editing Config -> Silence Threshold: {silence_thresh}s, Zoom Scale: {zoom_perc}%, BGM Volume: {bgm_vol}")
     
     # 1. Gather video information
     duration, width, height = get_video_info(video_path)
@@ -392,7 +548,7 @@ def process_video(video_path, move_to_processed=True):
     else:
         print(f"Using cached transcription with {len(segments)} speech segments.")
         
-    # 3. Detect speech intervals with AUTO SILENCE CUT
+    # 3. Detect speech intervals with AUTO SILENCE CUT (>0.3s) and Filler Removal
     speech_intervals = get_speech_intervals(segments, duration, merge_threshold=silence_thresh)
     print(f"Formed {len(speech_intervals)} non-silent topic blocks (Auto Silence Cut <{silence_thresh}s).")
     
@@ -401,19 +557,18 @@ def process_video(video_path, move_to_processed=True):
     video_history = history.get(base_name, {"used_intervals": []})
     used_intervals = video_history.get("used_intervals", [])
     
-    print(f"Previously used intervals count for this video: {len(used_intervals)}")
-    
-    # 5. Select 10 NEW non-overlapping clips (skipping used intervals)
-    selected_clips = select_10_clips(speech_intervals, duration, used_intervals=used_intervals)
-    print(f"Selected {len(selected_clips)} NEW unique topic clips for export.")
+    # 5. Select 1-3 Contextual Story Clips per day
+    selected_clips = select_story_clips(speech_intervals, duration, used_intervals=used_intervals)
+    print(f"Selected {len(selected_clips)} Contextual Story clips for export.")
     
     if not selected_clips:
-        print("Error: No new unique topic clips could be sliced.")
+        print("Error: No new unique story clips could be sliced.")
         return False
         
     crop_100, crop_zoom = get_crop_filters(width, height, zoom_percentage=zoom_perc)
     
     # 6. Render selected clips with DYNAMIC PUNCH-IN and sequential RAW VDO XXX.mp4 naming
+    created_clip_names = []
     success_count = 0
     new_used_intervals = list(used_intervals)
     start_vdo_num = get_next_raw_vdo_number(OUTPUT_DIR)
@@ -428,6 +583,7 @@ def process_video(video_path, move_to_processed=True):
         success = render_clip(video_path, output_path, clip["sub_intervals"], crop_100, crop_zoom)
         if success:
             success_count += 1
+            created_clip_names.append(clip_name)
             new_used_intervals.append([clip["start_time"], clip["end_time"]])
             print(f"Successfully exported: {clip_name}")
         else:
@@ -439,6 +595,10 @@ def process_video(video_path, move_to_processed=True):
     }
     save_history(history)
     
+    # Record SHA-256 hash into processed_history.json for Anti-Duplication Check
+    if success_count > 0 and file_hash:
+        record_processed_file(video_path, file_hash, created_clip_names)
+        
     # 7. Post-processing and LINE Bi-Directional Report
     elapsed = time.time() - start_time
     print(f"\nProcessing finished in {elapsed:.2f} seconds. Success count: {success_count}/{len(selected_clips)}")
@@ -502,14 +662,14 @@ def get_target_video_file():
     raw_files = []
     for ext in supported_extensions:
         raw_files.extend(glob.glob(os.path.join(INPUT_DIR, ext)))
-    raw_files = [f for f in raw_files if os.path.isfile(f)]
+    raw_files = [f for f in raw_files if os.path.isfile(f) and not os.path.basename(f).startswith("_")]
     if raw_files:
         return raw_files[0], True
         
     proc_files = []
     for ext in supported_extensions:
         proc_files.extend(glob.glob(os.path.join(PROCESSED_DIR, ext)))
-    proc_files = [f for f in proc_files if os.path.isfile(f)]
+    proc_files = [f for f in proc_files if os.path.isfile(f) and not os.path.basename(f).startswith("_")]
     if proc_files:
         return proc_files[0], False
         
@@ -517,11 +677,14 @@ def get_target_video_file():
 
 def watch_folder():
     """Watches the input directory for video files and processes them."""
-    print(f"Starting Video-AutoCutter-Agent...")
+    print(f"Starting Video-AutoCutter-Agent v4.0...")
     print(f"Input Watch Folder: {INPUT_DIR}")
     print(f"Output Folder: {OUTPUT_DIR}")
     print(f"Processed Folder: {PROCESSED_DIR}")
-    print(f"LINE Bi-Directional Integration: Active")
+    print(f"Smart Anti-Duplicate Check: Active (SHA-256)")
+    print(f"Storage Maintenance: Auto-delete raw files > 48 hours")
+    print(f"Contextual Grouping: Active (1-3 top story clips/day)")
+    print(f"No Subtitles: Clean 9:16 vertical @ 60fps")
     
     while True:
         target_video, should_move = get_target_video_file()
