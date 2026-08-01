@@ -1,0 +1,26 @@
+# Environment & Secrets
+.env
+*.env
+
+# Python bytecode & cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local history & output cache
+history.json
+pending_queue.json
+user_feedback.json
+LINE_WEBHOOK_URL.txt
+transcripts/
+
+# Hardlink temp files
+_ffmpeg_in_*.mp4
+_ffmpeg_out_*.mp4
+_probe_*.mp4
+
+# Video files (avoid committing large video files)
+*.mp4
+*.mov
+*.mkv
+*.avi
