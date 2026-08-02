@@ -616,11 +616,9 @@ if __name__ == "__main__":
             print("No raw files found in processed directory to reprocess.")
     else:
         raw_videos = get_target_raw_video_files()
-        if not raw_videos:
-            restored_files = restore_raw_files_from_processed()
-            if restored_files:
-                process_all_raw_videos_as_single_master(restored_files, force_reprocess=True)
-            else:
-                print(f"No raw video files currently found in {INPUT_DIR}.")
+        if raw_videos:
+            process_all_raw_videos_as_single_master(raw_videos, force_reprocess=False)
         else:
-            process_all_raw_videos_as_single_master(raw_videos, force_reprocess=True)
+            print(f"No raw video files found in {INPUT_DIR}.")
+            print("Entering folder watcher mode (waiting for new incoming files in RW)...")
+            watch_folder()
