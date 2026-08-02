@@ -39,56 +39,55 @@ def save_user_feedback(data):
         print(f"Error saving user feedback: {e}")
 
 def push_line_message(message_text, target_user_id=None):
-    """Sends a push message to LINE user via LINE Messaging API or Cloud Relay."""
+    """
+    Sends a message to LINE user/followers via LINE Messaging API.
+    If target_user_id / LINE_USER_ID is set, uses Push API (/v2/bot/message/push).
+    If target_user_id is empty, automatically uses Broadcast API (/v2/bot/message/broadcast) to reach LINE OA!
+    """
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
     user_id = target_user_id or os.getenv("LINE_USER_ID")
-    render_url = os.getenv("RENDER_WEBHOOK_URL", "").rstrip('/')
     
-    # Send via Render Cloud Relay if available
-    if render_url:
-        try:
-            res = requests.post(f"{render_url}/api/report", json={
-                "message": message_text,
-                "user_id": user_id
-            }, timeout=10)
-            if res.status_code == 200:
-                print("LINE Push Notification sent via Render Cloud Relay!")
-                return True
-        except Exception as e:
-            print(f"Cloud Relay push failed: {e}. Falling back to direct LINE API.")
-
     if not token:
-        print("Warning: LINE_CHANNEL_ACCESS_TOKEN is missing in .env.")
+        print("❌ [LINE API Error] LINE_CHANNEL_ACCESS_TOKEN is missing in .env.")
         return False
         
-    if not user_id:
-        print("Notice: LINE_USER_ID is not set yet. Send a message to the bot on LINE first to auto-register your User ID!")
-        return False
-        
-    url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}"
     }
-    payload = {
-        "to": user_id,
-        "messages": [
-            {
-                "type": "text",
-                "text": message_text
-            }
-        ]
-    }
+    
+    if user_id and user_id.strip():
+        # Use Push API to specific user
+        url = "https://api.line.me/v2/bot/message/push"
+        payload = {
+            "to": user_id.strip(),
+            "messages": [{"type": "text", "text": message_text}]
+        }
+        api_mode = f"Push API (to: {user_id.strip()})"
+    else:
+        # Fallback to Broadcast API to reach all LINE OA followers
+        url = "https://api.line.me/v2/bot/message/broadcast"
+        payload = {
+            "messages": [{"type": "text", "text": message_text}]
+        }
+        api_mode = "Broadcast API (All LINE OA Followers)"
+        
+    print(f"\n--- Sending LINE Message via {api_mode} ---")
+    print(f"Endpoint: {url}")
+    
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        print(f"HTTP Status Code: {response.status_code}")
+        print(f"Response Body: {response.text if response.text else '{}'}")
+        
         if response.status_code == 200:
-            print("LINE Push Notification sent successfully!")
+            print("✅ LINE Message delivered successfully (HTTP 200 OK)!")
             return True
         else:
-            print(f"LINE Push API Error: {response.status_code} - {response.text}")
+            print(f"❌ LINE API Error: HTTP {response.status_code} - {response.text}")
             return False
     except Exception as e:
-        print(f"Error sending LINE Push Notification: {e}")
+        print(f"❌ Error sending LINE Message: {e}")
         return False
 
 def reply_line_message(reply_token, message_text):
@@ -104,12 +103,7 @@ def reply_line_message(reply_token, message_text):
     }
     payload = {
         "replyToken": reply_token,
-        "messages": [
-            {
-                "type": "text",
-                "text": message_text
-            }
-        ]
+        "messages": [{"type": "text", "text": message_text}]
     }
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
