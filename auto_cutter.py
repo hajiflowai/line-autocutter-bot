@@ -6,6 +6,7 @@ import json
 import re
 import hashlib
 import subprocess
+import shutil
 import requests
 from dotenv import load_dotenv
 
@@ -423,18 +424,19 @@ def render_multi_video_master(video_items, output_path, zoom_perc=120):
 
 def process_all_raw_videos_as_single_master(raw_video_paths):
     r"""
-    MULTI-FILE SINGLE MASTER MODE:
+    MULTI-TAKE CLEAN & STITCH MODE:
     When multiple video files are placed in Z:\AI\EDIT AI\RW:
-    1. Transcribes every raw video file with Whisper STT (th).
-    2. Extracts พ.ศ. (Thai Buddhist Year) and sorts files chronologically by พ.ศ. year or creation time.
-    3. Slices & removes silences > 0.3s and stutters from every file.
-    4. Stitches all clips into A SINGLE MASTER OUTPUT VIDEO ('วิดีโอเดียวจบ') -> Z:\AI\Ready for media appearances.
-    5. Moves processed raw files to Z:\AI\EDIT AI\RW\processed and records SHA-256 hashes.
+    1. Sorts raw video files chronologically by creation timestamp / filename.
+    2. Transcribes every raw video file with Whisper STT (th).
+    3. Extracts พ.ศ. (Thai Buddhist Year) if mentioned.
+    4. Removes silences > 0.3s and stutters from every file.
+    5. Stitches all clips into A SINGLE MASTER OUTPUT VIDEO ('RAW_VDO_COMBINED.mp4').
+    6. Moves processed raw files to Z:\AI\EDIT AI\RW\processed and records SHA-256 hashes.
     """
     cleanup_old_raw_files(hours_threshold=48)
     
     print(f"\n=======================================================")
-    print(f"🎬 Processing {len(raw_video_paths)} RAW Videos into a SINGLE MASTER VIDEO")
+    print(f"🎬 Processing {len(raw_video_paths)} RAW Videos into RAW_VDO_COMBINED.mp4")
     print(f"=======================================================\n")
     
     # Load Whisper model
@@ -447,10 +449,9 @@ def process_all_raw_videos_as_single_master(raw_video_paths):
     zoom_perc = int(feedback.get("zoom_percentage", 120))
     
     processed_video_items = []
-    successful_hashes = []
     
     for idx, vpath in enumerate(raw_video_paths):
-        print(f"\n--- File {idx+1}/{len(raw_video_paths)}: {os.path.basename(vpath)} ---")
+        print(f"\n--- Processing Take {idx+1}/{len(raw_video_paths)}: {os.path.basename(vpath)} ---")
         
         # Anti-duplicate check
         is_dup, fhash = is_duplicate_file(vpath)
@@ -473,7 +474,7 @@ def process_all_raw_videos_as_single_master(raw_video_paths):
         creation_time = os.path.getmtime(vpath)
         
         speech_intervals = get_speech_intervals(segments, duration, merge_threshold=silence_thresh)
-        print(f"Extracted {len(speech_intervals)} non-silent blocks.")
+        print(f"Extracted {len(speech_intervals)} non-silent speech blocks.")
         
         if speech_intervals:
             processed_video_items.append({
@@ -493,24 +494,34 @@ def process_all_raw_videos_as_single_master(raw_video_paths):
     # Sort files: Primary by Buddhist Year (พ.ศ. ascending), Secondary by file creation time
     processed_video_items.sort(key=lambda x: (x["buddhist_year"], x["creation_time"]))
     
-    print("\n--- Final Video Stitch Sequence (Sorted by พ.ศ. / Time) ---")
+    print("\n--- Final Video Stitch Sequence (Sorted by Created Date / พ.ศ.) ---")
     for i, item in enumerate(processed_video_items):
-        yr_str = f"พ.ศ. {item['buddhist_year']}" if item['buddhist_year'] != 9999 else "ไม่ระบุ พ.ศ."
-        print(f"  {i+1}. {os.path.basename(item['path'])} ({yr_str})")
+        yr_str = f"พ.ศ. {item['buddhist_year']}" if item['buddhist_year'] != 9999 else f"Created: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(item['creation_time']))}"
+        print(f"  Take {i+1}. {os.path.basename(item['path'])} ({yr_str})")
         
     next_num = get_next_raw_vdo_number(OUTPUT_DIR)
     master_clip_name = f"RAW VDO {next_num:03d}.mp4"
     master_output_path = os.path.join(OUTPUT_DIR, master_clip_name)
+    combined_output_path = os.path.join(OUTPUT_DIR, "RAW_VDO_COMBINED.mp4")
     
     success = render_multi_video_master(processed_video_items, master_output_path, zoom_perc=zoom_perc)
     
     if success:
+        # Create explicit RAW_VDO_COMBINED.mp4 file in output folder
+        try:
+            if os.path.exists(combined_output_path):
+                os.remove(combined_output_path)
+            shutil.copy2(master_output_path, combined_output_path)
+            print(f"✅ Exported explicit combined master: {combined_output_path}")
+        except Exception as e:
+            print(f"Note creating combined copy: {e}")
+            
         # Move raw files to processed directory & record hashes
         for item in processed_video_items:
             vpath = item["path"]
             fhash = item["hash"]
             if fhash:
-                record_processed_file(vpath, fhash, [master_clip_name])
+                record_processed_file(vpath, fhash, [master_clip_name, "RAW_VDO_COMBINED.mp4"])
                 
             if os.path.exists(vpath) and os.path.dirname(os.path.abspath(vpath)) == os.path.abspath(INPUT_DIR):
                 dest_path = os.path.join(PROCESSED_DIR, os.path.basename(vpath))
@@ -518,7 +529,7 @@ def process_all_raw_videos_as_single_master(raw_video_paths):
                     if os.path.exists(dest_path):
                         os.remove(dest_path)
                     os.rename(vpath, dest_path)
-                    print(f"Moved raw video to {dest_path}")
+                    print(f"📁 Moved raw take file to: {dest_path}")
                 except Exception as e:
                     print(f"Error moving file to processed dir: {e}")
                     
@@ -568,14 +579,18 @@ def get_target_raw_video_files():
 
 def watch_folder():
     """Watches the input directory for video files and processes them as a Single Master Video."""
-    print(f"Starting Video-AutoCutter-Agent v5.0 (Single Master Video Stitch Mode)...")
+    print(f"Starting Video-AutoCutter-Agent v5.0 (Multi-Take Clean & Stitch Mode)...")
     print(f"Input Watch Folder: {INPUT_DIR}")
-    print(f"Output Folder: {OUTPUT_DIR}")
-    print(f"Processed Folder: {PROCESSED_DIR}")
+    print(f"Output Master Target: {os.path.join(OUTPUT_DIR, 'RAW_VDO_COMBINED.mp4')}")
+    print(f"Processed Cleanup Folder: {PROCESSED_DIR}")
+    print(f"Smart Anti-Duplicate Check: Active (SHA-256)")
+    print(f"Silence Cut Threshold: > 0.3s")
+    print(f"Storage Maintenance: Auto-delete raw files > 48 hours")
     
     while True:
         raw_videos = get_target_raw_video_files()
         if raw_videos:
+            print(f"\n[Watch Folder] Detected {len(raw_videos)} raw video file(s) in {INPUT_DIR}...")
             stable_videos = [v for v in raw_videos if check_file_stability(v)]
             if stable_videos:
                 try:
@@ -588,8 +603,13 @@ def watch_folder():
             time.sleep(5)
 
 if __name__ == "__main__":
-    raw_videos = get_target_raw_video_files()
-    if raw_videos:
-        process_all_raw_videos_as_single_master(raw_videos)
+    if len(sys.argv) > 1 and sys.argv[1] == "--watch":
+        watch_folder()
     else:
-        print("No raw video files found in Z:\\AI\\EDIT AI\\RW directory.")
+        raw_videos = get_target_raw_video_files()
+        if raw_videos:
+            process_all_raw_videos_as_single_master(raw_videos)
+        else:
+            print(f"No raw video files currently found in {INPUT_DIR}.")
+            print("Entering folder watcher mode (waiting for incoming files in RW)...")
+            watch_folder()
