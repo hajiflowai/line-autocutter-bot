@@ -1,7 +1,12 @@
 import os
+import sys
 import json
 import requests
 from dotenv import load_dotenv
+
+# Force UTF-8 output encoding for Windows stdout
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 load_dotenv()
 
@@ -34,10 +39,24 @@ def save_user_feedback(data):
         print(f"Error saving user feedback: {e}")
 
 def push_line_message(message_text, target_user_id=None):
-    """Sends a push message to LINE user via LINE Messaging API."""
+    """Sends a push message to LINE user via LINE Messaging API or Cloud Relay."""
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
     user_id = target_user_id or os.getenv("LINE_USER_ID")
+    render_url = os.getenv("RENDER_WEBHOOK_URL", "").rstrip('/')
     
+    # Send via Render Cloud Relay if available
+    if render_url:
+        try:
+            res = requests.post(f"{render_url}/api/report", json={
+                "message": message_text,
+                "user_id": user_id
+            }, timeout=10)
+            if res.status_code == 200:
+                print("LINE Push Notification sent via Render Cloud Relay!")
+                return True
+        except Exception as e:
+            print(f"Cloud Relay push failed: {e}. Falling back to direct LINE API.")
+
     if not token:
         print("Warning: LINE_CHANNEL_ACCESS_TOKEN is missing in .env.")
         return False
@@ -99,11 +118,15 @@ def reply_line_message(reply_token, message_text):
         print(f"Error replying LINE message: {e}")
         return False
 
-def generate_ai_self_analysis_report(start_vdo, end_vdo, count, output_dir=r"Z:\AI\Ready for media appearances"):
+def generate_ai_self_analysis_report(start_vdo, end_vdo, count, output_dir=None):
     """Generates automated evaluation report with AI self-analysis and feature suggestions."""
+    if output_dir is None:
+        output_dir = r"Z:\AI\AI REDY" if os.path.exists(r"Z:\AI\AI REDY") else r"Z:\AI\Ready for media appearances"
     feedback = load_user_feedback()
     silence_val = feedback.get("silence_threshold", 0.3)
     zoom_val = feedback.get("zoom_percentage", 115)
+    
+    vdo_str = f"RAW VDO {start_vdo:03d}" if start_vdo == end_vdo else f"RAW VDO {start_vdo:03d} - RAW VDO {end_vdo:03d}"
     
     report = f"""🎬 [Antigravity Bi-Directional Agent Report]
 ตัดต่อวิดีโอ Zero-Manual สำเร็จเรียบร้อยแล้ว {count} คลิป!
@@ -112,7 +135,7 @@ def generate_ai_self_analysis_report(start_vdo, end_vdo, count, output_dir=r"Z:\
 {output_dir}
 
 🎥 คลิปที่สร้างสำเร็จ:
-RAW VDO {start_vdo:03d} - RAW VDO {end_vdo:03d} (9:16 Vertical @ 60fps)
+{vdo_str} (9:16 Vertical @ 60fps)
 
 ----------------------------------
 🔍 [AI Self-Analysis: วิเคราะห์งานรอบนี้]
