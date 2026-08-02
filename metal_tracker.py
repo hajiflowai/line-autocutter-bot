@@ -114,40 +114,47 @@ def scrape_gold_price():
 
 def scrape_silver_price():
     """
-    Scrapes silver price from https://kpt.in.th/silverprice.php
-    Extracts 'ราคารับซื้อเงินรูปพรรณ (92.5%)' per kg and calculates THB/Gram (divide by 1,000g).
+    Scrapes silver price directly in THB/Gram from https://kpt.in.th/silverprice.php
+    Extracts 'ราคารับซื้อคืนเงินรูปพรรณ: กรัมละ XX.X บาท' directly from website text.
     """
     url = "https://kpt.in.th/silverprice.php"
     print(f"Scraping Silver Price from {url}...")
     
-    silver_925_buy_kg = None
+    silver_per_gram = None
     
     try:
         response = requests.get(url, headers=HTTP_HEADERS, timeout=12)
         response.raise_for_status()
-        soup = BeautifulSoup(response.content, "html.parser")
+        soup = BeautifulSoup(response.content.decode("utf-8", "ignore"), "html.parser")
+        page_text = soup.get_text(" ", strip=True)
         
-        for tr in soup.find_all("tr"):
-            txt = tr.get_text(" ", strip=True)
-            if "92.5%" in txt:
-                nums = re.findall(r"[\d,]+", txt)
-                if nums:
-                    silver_925_buy_kg = float(nums[-1].replace(",", ""))
+        # Primary regex: 'ราคารับซื้อคืนเงินรูปพรรณ: กรัมละ XX.X บาท'
+        m = re.search(r"ราคารับซื้อคืนเงินรูปพรรณ.*?:?\s*กรัมละ\s*([\d\.]+)\s*บาท", page_text, re.IGNORECASE)
+        if m:
+            silver_per_gram = float(m.group(1))
+        else:
+            # Secondary fallback regex: 'เงินรูปพรรณ.*?กรัมละ\s*([\d\.]+)'
+            m2 = re.search(r"เงินรูปพรรณ.*?:?\s*กรัมละ\s*([\d\.]+)", page_text, re.IGNORECASE)
+            if m2:
+                silver_per_gram = float(m2.group(1))
+            else:
+                # Tertiary fallback regex: 'กรัมละ\s*([\d\.]+)\s*บาท'
+                m3 = re.search(r"กรัมละ\s*([\d\.]+)\s*บาท", page_text, re.IGNORECASE)
+                if m3:
+                    silver_per_gram = float(m3.group(1))
                     
-        if silver_925_buy_kg is not None:
-            silver_per_gram = silver_925_buy_kg / 1000.0
-            print(f"✅ Extracted Silver Buy: {silver_925_buy_kg:,.0f} THB/Kg -> {silver_per_gram:,.2f} THB/Gram")
+        if silver_per_gram is not None:
+            print(f"✅ Extracted Silver Buy (ราคารับซื้อคืนเงินรูปพรรณ): {silver_per_gram:,.2f} บาท/กรัม")
             return {
-                "silver_925_buy_kg": silver_925_buy_kg,
                 "silver_per_gram": silver_per_gram
             }
     except Exception as e:
         print(f"❌ Error scraping silver price: {e}")
         
-    default_kg = 3935.0
+    default_silver = 51.4
+    print(f"⚠️ Applying default silver per gram: {default_silver} บาท/กรัม")
     return {
-        "silver_925_buy_kg": default_kg,
-        "silver_per_gram": default_kg / 1000.0
+        "silver_per_gram": default_silver
     }
 
 def update_and_get_prices():
@@ -190,7 +197,6 @@ def update_and_get_prices():
     hist_map[today_str] = {
         "gold_ornament_buy_baht": gold_data["gold_ornament_buy_baht"],
         "gold_per_gram": gold_data["gold_per_gram"],
-        "silver_925_buy_kg": silver_data["silver_925_buy_kg"],
         "silver_per_gram": silver_data["silver_per_gram"],
         "updated_at": now_str
     }
@@ -264,7 +270,7 @@ def get_metal_summary_for_report():
     return summary
 
 if __name__ == "__main__":
-    print("=== Testing Metal Tracker Scraper (THB/Gram Mode) ===")
+    print("=== Testing Metal Tracker Scraper (Direct Per-Gram Scrape) ===")
     res = update_and_get_prices()
     print("\n--- Scraped Results ---")
     print(f"🥇 ราคาทองรูปพรรณ (รับซื้อ): {res['gold_per_gram']:,.2f} บาท/กรัม ({res['gold_diff_str']} บาท/กรัม)")

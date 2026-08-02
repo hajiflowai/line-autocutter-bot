@@ -1,19 +1,17 @@
 {
-  "last_updated": "2026-08-02 12:49:24",
+  "last_updated": "2026-08-02 12:54:00",
   "current": {
     "gold_ornament_buy_baht": 62716.92,
     "gold_per_gram": 4137.0,
-    "silver_925_buy_kg": 3935.0,
-    "silver_per_gram": 3.935,
-    "updated_at": "2026-08-02 12:49:24"
+    "silver_per_gram": 51.4,
+    "updated_at": "2026-08-02 12:54:00"
   },
   "history": {
     "2026-08-02": {
       "gold_ornament_buy_baht": 62716.92,
       "gold_per_gram": 4137.0,
-      "silver_925_buy_kg": 3935.0,
-      "silver_per_gram": 3.935,
-      "updated_at": "2026-08-02 12:49:24"
+      "silver_per_gram": 51.4,
+      "updated_at": "2026-08-02 12:54:00"
     }
   },
   "last_urgent_alert_time": 0
