@@ -13,6 +13,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 # Ensure project dir is in sys.path
 sys.path.append(r"Z:\AI\EDIT AI")
 import line_bot_manager
+import metal_tracker
 
 load_dotenv()
 
@@ -47,7 +48,6 @@ def fetch_top_action_plan():
     """Generates a concise, highly actionable content strategy plan for 'บอลแบงค์เก่า'."""
     today_str = datetime.date.today().strftime("%d/%m/%Y")
     
-    # Highly targeted viral topic & actionable execution plan
     return {
         "date": today_str,
         "viral_topic": "เหรียญ 10 บาท พ.ศ. 2533 (ผลิตเพียง 100 เหรียญ ยอดวิว TikTok พุ่ง 1.2M)",
@@ -59,6 +59,7 @@ def fetch_top_action_plan():
 def generate_compact_action_plan_report():
     """Formats the concise Daily Action Plan template strictly according to LINE OA constraints."""
     data = fetch_top_action_plan()
+    metal_summary = metal_tracker.get_metal_summary_for_report()
     
     report = f"""📌 [แผนงานทำคอนเทนต์ประจำวัน - บอลแบงค์เก่า]
 ประจำวันที่ {data['date']}
@@ -71,7 +72,9 @@ def generate_compact_action_plan_report():
    • Point (จุดซูม): {data['zoom_point']}
 
 💡 3. AI & CapCut Tip:
-   • {data['ai_capcut_tip']}"""
+   • {data['ai_capcut_tip']}
+
+{metal_summary}"""
     return report
 
 def run_trend_reporter(force=False):
@@ -95,21 +98,35 @@ def run_trend_reporter(force=False):
         
     return success
 
-def schedule_daily_runner():
-    """Runs continuously and triggers the trend report daily at 10:30 AM strictly once per day."""
-    print("AI & Trend Daily Action Plan Scheduler started (Target Time: 10:30 AM daily, 1 msg/day quota guard active)...")
+def schedule_hourly_and_daily():
+    """
+    Runs continuously:
+    1. Checks Gold Price Urgent Alert hourly.
+    2. Sends Daily Action Plan Report at 10:30 AM strictly once per day.
+    """
+    print("AI & Trend Daily Action Plan + Metal Tracker Scheduler started...")
+    print("• Urgent Gold Alert: Active (Checks hourly for volatility >= 300 Baht)")
+    print("• Daily Report Target Time: 10:30 AM (1 msg/day quota guard active)")
+    
+    last_hourly_check = 0
+    
     while True:
         now = datetime.datetime.now()
-        target_time = now.replace(hour=10, minute=30, second=0, microsecond=0)
+        now_ts = time.time()
         
-        if now >= target_time:
-            target_time += datetime.timedelta(days=1)
+        # 1. Hourly Urgent Gold Price Alert Check
+        if now_ts - last_hourly_check >= 3600:
+            last_hourly_check = now_ts
+            try:
+                metal_tracker.check_urgent_gold_alert(threshold=300.0)
+            except Exception as e:
+                print(f"Error checking urgent gold alert: {e}")
+                
+        # 2. Daily Report Trigger at 10:30 AM
+        if now.hour == 10 and now.minute == 30 and can_send_today():
+            run_trend_reporter(force=False)
             
-        wait_seconds = (target_time - now).total_seconds()
-        print(f"Next report scheduled for: {target_time.strftime('%Y-%m-%d %H:%M:%S')} (Waiting {wait_seconds/3600:.2f} hours)")
-        
-        time.sleep(wait_seconds)
-        run_trend_reporter(force=False)
+        time.sleep(60)
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--now":
