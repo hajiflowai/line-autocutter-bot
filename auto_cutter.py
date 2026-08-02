@@ -133,10 +133,7 @@ def cleanup_old_raw_files(hours_threshold=48):
     hashes = proc_history.get("hashes", {})
     
     now_epoch = time.time()
-    threshold_seconds = hours_threshold * 3600
     deleted_count = 0
-    
-    search_dirs = [INPUT_DIR, PROCESSED_DIR]
     
     for file_hash, entry in list(hashes.items()):
         proc_epoch = entry.get("processed_epoch", 0)
@@ -144,7 +141,6 @@ def cleanup_old_raw_files(hours_threshold=48):
         
         if elapsed_hours >= hours_threshold:
             filename = entry.get("filename")
-            # Check all possible locations of the raw file
             possible_paths = [
                 entry.get("raw_path"),
                 os.path.join(INPUT_DIR, filename) if filename else None,
@@ -248,7 +244,7 @@ def get_video_info(file_path):
                 pass
         return 0.0, 0, 0
 
-def get_crop_filters(width, height, zoom_percentage=115):
+def get_crop_filters(width, height, zoom_percentage=120):
     """
     Generates 100% normal crop and zoom_percentage% punch-in zoom crop filters for vertical 9:16 format (1080x1920).
     """
@@ -275,10 +271,7 @@ def get_crop_filters(width, height, zoom_percentage=115):
     return filter_100, filter_zoom
 
 def filter_filler_words_and_stutters(segments):
-    """
-    Filters out filler words, stutters, and broken sound fragments
-    (e.g., isolated 'เอ่อ', 'อ่า', or empty sound bursts).
-    """
+    """Filters out filler words, stutters, and broken sound fragments."""
     clean_segments = []
     filler_patterns = re.compile(r"^(เอ่อ|อ่า|เออ|อือ|แบบว่า|อั๊วะ|อะ)$", re.IGNORECASE)
     
@@ -286,7 +279,6 @@ def filter_filler_words_and_stutters(segments):
         text = seg.get("text", "").strip()
         duration = float(seg.get("end", 0)) - float(seg.get("start", 0))
         
-        # Skip isolated filler sound fragments < 0.8s
         if duration < 0.8 and filler_patterns.match(text):
             print(f"Filter Out Filler Sound: '{text}' ({duration:.2f}s)")
             continue
@@ -296,10 +288,7 @@ def filter_filler_words_and_stutters(segments):
     return clean_segments
 
 def get_speech_intervals(segments, total_duration, padding_start=0.05, padding_end=0.1, merge_threshold=0.3):
-    """
-    AUTO SILENCE CUT: Automatically detects and removes all silences longer than merge_threshold seconds (default 0.3s).
-    Also filters out filler words and stutters.
-    """
+    """Detects and removes all silences longer than merge_threshold seconds (default 0.3s)."""
     clean_segs = filter_filler_words_and_stutters(segments)
     
     raw_intervals = []
@@ -327,135 +316,81 @@ def get_speech_intervals(segments, total_duration, padding_start=0.05, padding_e
     merged.append((curr_s, curr_e))
     return merged
 
-def is_overlapping(s1, e1, s2, e2):
-    """Returns True if interval [s1, e1] overlaps with interval [s2, e2]."""
-    return max(s1, s2) < min(e1, e2)
+def extract_buddhist_year(segments):
+    """
+    Extracts Thai Buddhist Year (พ.ศ. 25XX) mentioned in transcription segments.
+    Returns earliest year found (e.g. 2510, 2525, 2533) or 9999 if not found.
+    """
+    year_pattern = re.compile(r"(?:พ\.ศ\.|ปี|\b)(25\d{2})\b")
+    found_years = []
+    for seg in segments:
+        text = seg.get("text", "")
+        matches = year_pattern.findall(text)
+        for m in matches:
+            try:
+                found_years.append(int(m))
+            except ValueError:
+                pass
+    if found_years:
+        earliest_year = min(found_years)
+        print(f"  • Extracted Buddhist Year: พ.ศ. {earliest_year}")
+        return earliest_year
+    return 9999
 
-def select_story_clips(intervals, total_duration, min_duration=30.0, max_duration=180.0, target_clips_per_day=3, used_intervals=None):
+def render_multi_video_master(video_items, output_path, zoom_perc=120):
     """
-    CONTEXTUAL GROUPING & EDITING:
-    Analyzes speech blocks and selects 1-3 top-quality, coherent story clips per day.
-    Target clip duration: 30s to 180s (adaptive for short footage).
-    Skips any candidate clips that overlap with previously exported interval ranges.
-    """
-    if used_intervals is None:
-        used_intervals = []
-        
-    effective_min_duration = min(min_duration, max(10.0, total_duration * 0.5)) if total_duration < min_duration else min_duration
-    
-    candidates = []
-    n = len(intervals)
-    
-    for i in range(n):
-        curr_duration = 0.0
-        for j in range(i, n):
-            curr_duration += (intervals[j][1] - intervals[j][0])
-            if effective_min_duration <= curr_duration <= max_duration:
-                start_time = intervals[i][0]
-                end_time = intervals[j][1]
-                
-                has_history_overlap = False
-                for u_start, u_end in used_intervals:
-                    if is_overlapping(start_time, end_time, u_start, u_end):
-                        has_history_overlap = True
-                        break
-                        
-                if not has_history_overlap:
-                    candidates.append({
-                        "start_idx": i,
-                        "end_idx": j,
-                        "start_time": start_time,
-                        "end_time": end_time,
-                        "duration": curr_duration,
-                        "sub_intervals": intervals[i:j+1]
-                    })
-            elif curr_duration > max_duration:
-                break
-                
-    if not candidates:
-        print("No valid candidate story clips could be formed.")
-        return []
-        
-    # Select up to target_clips_per_day high quality clips spread across the video
-    selected_clips = []
-    last_end_block_idx = -1
-    
-    clip_count = min(target_clips_per_day, max(1, int(total_duration / 300))) if total_duration > 180 else min(target_clips_per_day, len(candidates))
-    
-    for m in range(clip_count):
-        target_start = m * (total_duration / clip_count)
-        best_candidate = None
-        best_diff = float('inf')
-        
-        for cand in candidates:
-            if cand["start_idx"] > last_end_block_idx:
-                diff = abs(cand["start_time"] - target_start)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_candidate = cand
-                    
-        if best_candidate is not None:
-            selected_clips.append(best_candidate)
-            last_end_block_idx = best_candidate["end_idx"]
-            
-    return selected_clips
-
-def render_clip(input_path, output_path, intervals, crop_filter_100, crop_filter_zoom):
-    """
-    Stitches speech intervals together and applies DYNAMIC PUNCH-IN:
-    Alternates scale between 100% and zoom_percentage% at every sentence boundary for a multi-camera jump cut effect.
-    Outputs clean vertical 9:16 video @ 60fps (NO subtitles, NO text, NO overlays).
+    Stitches multiple raw video clips into a SINGLE master video ('วิดีโอเดียวจบ'):
+    - video_items: list of dicts [{'path': p, 'intervals': [(s,e),...], 'width': w, 'height': h}, ...]
+    - Applies Dynamic Punch-in Zoom (100% -> 120%) across segments.
+    - Outputs 9:16 vertical 60fps video.
     """
     filter_complex = []
     video_maps = []
     audio_maps = []
     
-    for idx, (start, end) in enumerate(intervals):
-        v_raw_name = f"[vraw{idx}]"
-        v_name = f"[v{idx}]"
-        a_name = f"[a{idx}]"
+    ffmpeg_inputs = []
+    total_segments = 0
+    
+    for input_idx, item in enumerate(video_items):
+        ffmpeg_inputs.extend(["-i", item["path"]])
+        crop_100, crop_zoom = get_crop_filters(item["width"], item["height"], zoom_percentage=zoom_perc)
         
-        filter_complex.append(f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS{v_raw_name}")
-        filter_complex.append(f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS{a_name}")
-        
-        crop_fmt = crop_filter_100 if (idx % 2 == 0) else crop_filter_zoom
-        filter_complex.append(f"{v_raw_name}{crop_fmt}{v_name}")
-        
-        video_maps.append(v_name)
-        audio_maps.append(a_name)
+        for seg_idx, (start, end) in enumerate(item["intervals"]):
+            v_raw_name = f"[vraw_{input_idx}_{seg_idx}]"
+            v_name = f"[v_{input_idx}_{seg_idx}]"
+            a_name = f"[a_{input_idx}_{seg_idx}]"
+            
+            filter_complex.append(f"[{input_idx}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS{v_raw_name}")
+            filter_complex.append(f"[{input_idx}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS{a_name}")
+            
+            crop_fmt = crop_100 if (total_segments % 2 == 0) else crop_zoom
+            filter_complex.append(f"{v_raw_name}{crop_fmt}{v_name}")
+            
+            video_maps.append(v_name)
+            audio_maps.append(a_name)
+            total_segments += 1
+            
+    if total_segments == 0:
+        print("No valid speech segments found across video files.")
+        return False
         
     concat_inputs = "".join(f"{v}{a}" for v, a in zip(video_maps, audio_maps))
-    concat_filter = f"{concat_inputs}concat=n={len(intervals)}:v=1:a=1[vfinal][aconcat]"
+    concat_filter = f"{concat_inputs}concat=n={total_segments}:v=1:a=1[vfinal][aconcat]"
     filter_complex.append(concat_filter)
     
     filter_complex_str = ";".join(filter_complex)
     
-    dir_in = os.path.dirname(os.path.abspath(input_path))
     dir_out = os.path.dirname(os.path.abspath(output_path))
     pid = os.getpid()
+    temp_out = os.path.join(dir_out, f"_ffmpeg_master_out_{pid}.mp4")
     
-    temp_in = os.path.join(dir_in, f"_ffmpeg_in_{pid}.mp4")
-    temp_out = os.path.join(dir_out, f"_ffmpeg_out_{pid}.mp4")
-    
-    created_link = False
-    try:
-        if os.path.exists(temp_in):
-            os.remove(temp_in)
-        os.link(input_path, temp_in)
-        created_link = True
-        real_in = temp_in
-    except Exception as e:
-        print(f"Warning: Failed to create temp hardlink ({e}). Using direct path.")
-        real_in = input_path
-        
     if os.path.exists(temp_out):
         try:
             os.remove(temp_out)
         except Exception:
             pass
             
-    cmd = [
-        "ffmpeg", "-y", "-i", real_in,
+    cmd = ["ffmpeg", "-y"] + ffmpeg_inputs + [
         "-filter_complex", filter_complex_str,
         "-map", "[vfinal]", "-map", "[aconcat]",
         "-r", "60",
@@ -464,17 +399,11 @@ def render_clip(input_path, output_path, intervals, crop_filter_100, crop_filter
         temp_out
     ]
     
-    print(f"Rendering {os.path.basename(output_path)} with Dynamic Punch-in...")
+    print(f"\n🎬 Rendering Master Single Output Video ({os.path.basename(output_path)}) from {len(video_items)} clips...")
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
-    if created_link and os.path.exists(temp_in):
-        try:
-            os.remove(temp_in)
-        except Exception:
-            pass
-            
     if result.returncode != 0:
-        print(f"FFmpeg error: {result.stderr.decode('utf-8', errors='ignore')}")
+        print(f"FFmpeg master stitch error: {result.stderr.decode('utf-8', errors='ignore')}")
         if os.path.exists(temp_out):
             try:
                 os.remove(temp_out)
@@ -486,146 +415,121 @@ def render_clip(input_path, output_path, intervals, crop_filter_100, crop_filter
         if os.path.exists(output_path):
             os.remove(output_path)
         os.rename(temp_out, output_path)
+        print(f"✅ Master Single Output Video created successfully: {output_path}")
+        return True
     except Exception as e:
-        print(f"Error renaming output file to {output_path}: {e}")
-        if os.path.exists(temp_out):
-            try:
-                os.remove(temp_out)
-            except Exception:
-                pass
+        print(f"Error renaming master output file: {e}")
         return False
-        
-    return True
 
-def process_video(video_path, move_to_processed=True):
-    """Processes a RAW video file with Smart Anti-Duplicate Hash Check, Auto Silence Cut, and Dynamic Punch-in."""
-    # 0. Storage Maintenance Routine
+def process_all_raw_videos_as_single_master(raw_video_paths):
+    r"""
+    MULTI-FILE SINGLE MASTER MODE:
+    When multiple video files are placed in Z:\AI\EDIT AI\RW:
+    1. Transcribes every raw video file with Whisper STT (th).
+    2. Extracts พ.ศ. (Thai Buddhist Year) and sorts files chronologically by พ.ศ. year or creation time.
+    3. Slices & removes silences > 0.3s and stutters from every file.
+    4. Stitches all clips into A SINGLE MASTER OUTPUT VIDEO ('วิดีโอเดียวจบ') -> Z:\AI\Ready for media appearances.
+    5. Moves processed raw files to Z:\AI\EDIT AI\RW\processed and records SHA-256 hashes.
+    """
     cleanup_old_raw_files(hours_threshold=48)
     
-    start_time = time.time()
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-    print(f"\n--- Starting processing for: {video_path} ---")
+    print(f"\n=======================================================")
+    print(f"🎬 Processing {len(raw_video_paths)} RAW Videos into a SINGLE MASTER VIDEO")
+    print(f"=======================================================\n")
     
-    # Smart Anti-Duplicate Check via SHA-256 Hash
-    is_dup, file_hash = is_duplicate_file(video_path)
-    if is_dup:
-        return False
-        
-    # Auto-learn latest editing style from CapCut Drafts if available
-    try:
-        import capcut_style_learner
-        capcut_style_learner.run_capcut_style_learner()
-    except Exception as e:
-        print(f"CapCut style learner check: {e}")
-        
-    # Load dynamic user feedback parameters from LINE chat and CapCut style
+    # Load Whisper model
+    import whisper
+    print(f"Loading Whisper model '{WHISPER_MODEL_NAME}'...")
+    model = whisper.load_model(WHISPER_MODEL_NAME)
+    
     feedback = line_bot_manager.load_user_feedback()
     silence_thresh = float(feedback.get("silence_threshold", 0.3))
-    zoom_perc = int(feedback.get("zoom_percentage", 115))
-    bgm_vol = float(feedback.get("bgm_volume", 0.25))
-    print(f"Active Editing Config -> Silence Threshold: {silence_thresh}s, Zoom Scale: {zoom_perc}%, BGM Volume: {bgm_vol}")
+    zoom_perc = int(feedback.get("zoom_percentage", 120))
     
-    # 1. Gather video information
-    duration, width, height = get_video_info(video_path)
-    if duration <= 0:
-        print("Invalid video file or failed to extract duration.")
-        return False
+    processed_video_items = []
+    successful_hashes = []
+    
+    for idx, vpath in enumerate(raw_video_paths):
+        print(f"\n--- File {idx+1}/{len(raw_video_paths)}: {os.path.basename(vpath)} ---")
         
-    print(f"Video specs: {width}x{height}, duration: {duration:.2f}s")
-    
-    # 2. Get or compute Whisper transcription segments
-    segments = get_transcript_cache(video_path)
-    if segments is None:
-        print(f"Loading Whisper model '{WHISPER_MODEL_NAME}'...")
-        import whisper
-        model = whisper.load_model(WHISPER_MODEL_NAME)
-        
-        print("Transcribing video speech (language='th')...")
-        result = model.transcribe(video_path, language="th")
-        segments = result.get("segments", [])
-        print(f"Transcription finished. Detected {len(segments)} speech segments.")
-        save_transcript_cache(video_path, segments)
-    else:
-        print(f"Using cached transcription with {len(segments)} speech segments.")
-        
-    # 3. Detect speech intervals with AUTO SILENCE CUT (>0.3s) and Filler Removal
-    speech_intervals = get_speech_intervals(segments, duration, merge_threshold=silence_thresh)
-    print(f"Formed {len(speech_intervals)} non-silent topic blocks (Auto Silence Cut <{silence_thresh}s).")
-    
-    # 4. Load history of previously exported clip intervals
-    history = load_history()
-    video_history = history.get(base_name, {"used_intervals": []})
-    used_intervals = video_history.get("used_intervals", [])
-    
-    # 5. Select 1-3 Contextual Story Clips per day
-    selected_clips = select_story_clips(speech_intervals, duration, used_intervals=used_intervals)
-    print(f"Selected {len(selected_clips)} Contextual Story clips for export.")
-    
-    if not selected_clips:
-        print("Error: No new unique story clips could be sliced.")
-        return False
-        
-    crop_100, crop_zoom = get_crop_filters(width, height, zoom_percentage=zoom_perc)
-    
-    # 6. Render selected clips with DYNAMIC PUNCH-IN and sequential RAW VDO XXX.mp4 naming
-    created_clip_names = []
-    success_count = 0
-    new_used_intervals = list(used_intervals)
-    start_vdo_num = get_next_raw_vdo_number(OUTPUT_DIR)
-    
-    for idx, clip in enumerate(selected_clips):
-        next_vdo_num = start_vdo_num + idx
-        clip_name = f"RAW VDO {next_vdo_num:03d}.mp4"
-        output_path = os.path.join(OUTPUT_DIR, clip_name)
-        
-        print(f"Processing Clip {idx+1}/{len(selected_clips)} ({clip_name}): duration = {clip['duration']:.2f}s")
-        
-        success = render_clip(video_path, output_path, clip["sub_intervals"], crop_100, crop_zoom)
-        if success:
-            success_count += 1
-            created_clip_names.append(clip_name)
-            new_used_intervals.append([clip["start_time"], clip["end_time"]])
-            print(f"Successfully exported: {clip_name}")
-        else:
-            print(f"Failed to export clip {idx+1}")
+        # Anti-duplicate check
+        is_dup, fhash = is_duplicate_file(vpath)
+        if is_dup:
+            continue
             
-    # Save updated history
-    history[base_name] = {
-        "used_intervals": new_used_intervals
-    }
-    save_history(history)
-    
-    # Record SHA-256 hash into processed_history.json for Anti-Duplication Check
-    if success_count > 0 and file_hash:
-        record_processed_file(video_path, file_hash, created_clip_names)
+        duration, width, height = get_video_info(vpath)
+        if duration <= 0:
+            print("Invalid video file duration. Skipping.")
+            continue
+            
+        segments = get_transcript_cache(vpath)
+        if segments is None:
+            print("Transcribing speech (language='th')...")
+            res = model.transcribe(vpath, language="th")
+            segments = res.get("segments", [])
+            save_transcript_cache(vpath, segments)
+            
+        buddhist_year = extract_buddhist_year(segments)
+        creation_time = os.path.getmtime(vpath)
         
-    # 7. Post-processing and LINE Bi-Directional Report
-    elapsed = time.time() - start_time
-    print(f"\nProcessing finished in {elapsed:.2f} seconds. Success count: {success_count}/{len(selected_clips)}")
-    
-    if success_count > 0:
-        end_vdo_num = start_vdo_num + success_count - 1
+        speech_intervals = get_speech_intervals(segments, duration, merge_threshold=silence_thresh)
+        print(f"Extracted {len(speech_intervals)} non-silent blocks.")
         
-        if move_to_processed and os.path.exists(video_path) and os.path.dirname(os.path.abspath(video_path)) == os.path.abspath(INPUT_DIR):
-            dest_path = os.path.join(PROCESSED_DIR, os.path.basename(video_path))
-            try:
-                if os.path.exists(dest_path):
-                    os.remove(dest_path)
-                os.rename(video_path, dest_path)
-                print(f"Moved raw video to {dest_path}")
-            except Exception as e:
-                print(f"Error moving raw file to processed dir: {e}")
+        if speech_intervals:
+            processed_video_items.append({
+                "path": vpath,
+                "buddhist_year": buddhist_year,
+                "creation_time": creation_time,
+                "intervals": speech_intervals,
+                "width": width,
+                "height": height,
+                "hash": fhash
+            })
+            
+    if not processed_video_items:
+        print("No processable video files found.")
+        return False
+        
+    # Sort files: Primary by Buddhist Year (พ.ศ. ascending), Secondary by file creation time
+    processed_video_items.sort(key=lambda x: (x["buddhist_year"], x["creation_time"]))
+    
+    print("\n--- Final Video Stitch Sequence (Sorted by พ.ศ. / Time) ---")
+    for i, item in enumerate(processed_video_items):
+        yr_str = f"พ.ศ. {item['buddhist_year']}" if item['buddhist_year'] != 9999 else "ไม่ระบุ พ.ศ."
+        print(f"  {i+1}. {os.path.basename(item['path'])} ({yr_str})")
+        
+    next_num = get_next_raw_vdo_number(OUTPUT_DIR)
+    master_clip_name = f"RAW VDO {next_num:03d}.mp4"
+    master_output_path = os.path.join(OUTPUT_DIR, master_clip_name)
+    
+    success = render_multi_video_master(processed_video_items, master_output_path, zoom_perc=zoom_perc)
+    
+    if success:
+        # Move raw files to processed directory & record hashes
+        for item in processed_video_items:
+            vpath = item["path"]
+            fhash = item["hash"]
+            if fhash:
+                record_processed_file(vpath, fhash, [master_clip_name])
                 
-        # Send Bi-Directional LINE Report with AI Self-Analysis & Suggestions
-        line_bot_manager.send_completion_report(start_vdo_num, end_vdo_num, success_count)
+            if os.path.exists(vpath) and os.path.dirname(os.path.abspath(vpath)) == os.path.abspath(INPUT_DIR):
+                dest_path = os.path.join(PROCESSED_DIR, os.path.basename(vpath))
+                try:
+                    if os.path.exists(dest_path):
+                        os.remove(dest_path)
+                    os.rename(vpath, dest_path)
+                    print(f"Moved raw video to {dest_path}")
+                except Exception as e:
+                    print(f"Error moving file to processed dir: {e}")
+                    
+        line_bot_manager.send_completion_report(next_num, next_num, 1)
         return True
     else:
-        print("No clips were successfully rendered.")
+        print("Failed to render master single output video.")
         return False
 
 def check_file_stability(file_path):
     """Waits for file size to stabilize to ensure copy operation is complete."""
-    print(f"Checking file stability for {file_path}...")
     try:
         last_size = os.path.getsize(file_path)
     except OSError:
@@ -645,73 +549,47 @@ def check_file_stability(file_path):
                     pass
                 break
             except IOError:
-                print("File is locked. Waiting...")
+                pass
         else:
             last_size = curr_size
-            print(f"File is still copying. Size: {curr_size} bytes...")
             
         time.sleep(5)
         
-    print("File is stable and ready to process.")
     return True
 
-def get_target_video_file():
-    """Checks INPUT_DIR (RW) for video files. If empty, checks PROCESSED_DIR for available videos."""
+def get_target_raw_video_files():
+    """Checks INPUT_DIR (RW) for video files."""
     supported_extensions = ("*.mp4", "*.mov", "*.mkv", "*.avi", "*.flv", "*.ts", "*.webm")
-    
     raw_files = []
     for ext in supported_extensions:
         raw_files.extend(glob.glob(os.path.join(INPUT_DIR, ext)))
     raw_files = [f for f in raw_files if os.path.isfile(f) and not os.path.basename(f).startswith("_")]
-    if raw_files:
-        return raw_files[0], True
-        
-    proc_files = []
-    for ext in supported_extensions:
-        proc_files.extend(glob.glob(os.path.join(PROCESSED_DIR, ext)))
-    proc_files = [f for f in proc_files if os.path.isfile(f) and not os.path.basename(f).startswith("_")]
-    if proc_files:
-        return proc_files[0], False
-        
-    return None, False
+    return raw_files
 
 def watch_folder():
-    """Watches the input directory for video files and processes them."""
-    print(f"Starting Video-AutoCutter-Agent v4.0...")
+    """Watches the input directory for video files and processes them as a Single Master Video."""
+    print(f"Starting Video-AutoCutter-Agent v5.0 (Single Master Video Stitch Mode)...")
     print(f"Input Watch Folder: {INPUT_DIR}")
     print(f"Output Folder: {OUTPUT_DIR}")
     print(f"Processed Folder: {PROCESSED_DIR}")
-    print(f"Smart Anti-Duplicate Check: Active (SHA-256)")
-    print(f"Storage Maintenance: Auto-delete raw files > 48 hours")
-    print(f"Contextual Grouping: Active (1-3 top story clips/day)")
-    print(f"No Subtitles: Clean 9:16 vertical @ 60fps")
     
     while True:
-        target_video, should_move = get_target_video_file()
-        if target_video:
-            if check_file_stability(target_video):
+        raw_videos = get_target_raw_video_files()
+        if raw_videos:
+            stable_videos = [v for v in raw_videos if check_file_stability(v)]
+            if stable_videos:
                 try:
-                    process_video(target_video, move_to_processed=should_move)
+                    process_all_raw_videos_as_single_master(stable_videos)
                 except Exception as e:
-                    print(f"Fatal error processing {target_video}: {e}")
+                    print(f"Fatal error processing videos: {e}")
                     import traceback
                     traceback.print_exc()
         else:
             time.sleep(5)
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        target_file = sys.argv[1]
-        if os.path.exists(target_file) and os.path.isfile(target_file):
-            process_video(target_file, move_to_processed=False)
-        else:
-            print(f"Specified file does not exist: {target_file}")
+    raw_videos = get_target_raw_video_files()
+    if raw_videos:
+        process_all_raw_videos_as_single_master(raw_videos)
     else:
-        try:
-            target_video, should_move = get_target_video_file()
-            if target_video:
-                process_video(target_video, move_to_processed=should_move)
-            else:
-                print("No video file found in RW or processed directory.")
-        except KeyboardInterrupt:
-            print("\nAgent stopped by user.")
+        print("No raw video files found in Z:\\AI\\EDIT AI\\RW directory.")
