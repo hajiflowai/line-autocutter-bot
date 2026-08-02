@@ -10,6 +10,10 @@ import shutil
 import requests
 from dotenv import load_dotenv
 
+# Force UTF-8 output encoding for Windows stdout
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 # Ensure project dir is in sys.path
 sys.path.append(r"Z:\AI\EDIT AI")
 import line_bot_manager
@@ -247,7 +251,7 @@ def get_video_info(file_path):
 def get_crop_filters(width, height, zoom_percentage=108):
     """
     Generates 100% normal crop and gentle zoom_percentage% (108%) punch-in zoom crop filters
-    for vertical 9:16 format (1080x1920) for maximum natural viewing comfort.
+    for vertical 9:16 format (1080x1920) matching CapCut project '0802 (2)'.
     """
     target_aspect = 9 / 16
     
@@ -288,8 +292,11 @@ def filter_filler_words_and_stutters(segments):
         
     return clean_segments
 
-def get_speech_intervals(segments, total_duration, padding_start=0.05, padding_end=0.1, merge_threshold=0.3):
-    """Detects and removes all silences longer than merge_threshold seconds (default 0.3s)."""
+def get_speech_intervals(segments, total_duration, padding_start=0.02, padding_end=0.05, merge_threshold=0.20):
+    """
+    Learned from CapCut Project '0802 (2)':
+    Tight silence cut threshold = 0.20s, padding start = 0.02s, padding end = 0.05s.
+    """
     clean_segs = filter_filler_words_and_stutters(segments)
     
     raw_intervals = []
@@ -363,7 +370,6 @@ def render_multi_video_master(video_items, output_path, zoom_perc=108):
             filter_complex.append(f"[{input_idx}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS{v_raw_name}")
             filter_complex.append(f"[{input_idx}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS{a_name}")
             
-            # Natural Punch-in (108%) / Punch-out (100%) Zoom transition
             crop_fmt = crop_zoom if (total_segments % 2 == 1) else crop_100
             filter_complex.append(f"{v_raw_name}{crop_fmt}{v_name}")
             
@@ -400,7 +406,7 @@ def render_multi_video_master(video_items, output_path, zoom_perc=108):
         temp_out
     ]
     
-    print(f"\n🎬 Rendering Master Video with Natural Punch-in/Punch-out Zoom (~{zoom_perc}%)...")
+    print(f"\n🎬 Rendering Master Video matching CapCut '0802 (2)' Pattern (Total segments: {total_segments})...")
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
     if result.returncode != 0:
@@ -416,7 +422,11 @@ def render_multi_video_master(video_items, output_path, zoom_perc=108):
         if os.path.exists(output_path):
             os.remove(output_path)
         os.rename(temp_out, output_path)
+        
+        # Measure net duration of final output
+        info_dur, _, _ = get_video_info(output_path)
         print(f"✅ Master Single Output Video created successfully: {output_path}")
+        print(f"📊 Net Final Output Duration: {info_dur:.2f} seconds ({info_dur/60:.2f} mins)")
         return True
     except Exception as e:
         print(f"Error renaming master output file: {e}")
@@ -424,12 +434,12 @@ def render_multi_video_master(video_items, output_path, zoom_perc=108):
 
 def process_all_raw_videos_as_single_master(raw_video_paths, force_reprocess=False):
     r"""
-    MULTI-TAKE CLEAN & STITCH MODE:
+    MULTI-TAKE CLEAN & STITCH MODE (Learned Pattern 100% from CapCut '0802 (2)'):
     When multiple video files are placed in Z:\AI\EDIT AI\RW:
     1. Sorts raw video files chronologically by creation timestamp / filename.
     2. Transcribes every raw video file with Whisper STT (th).
     3. Extracts พ.ศ. (Thai Buddhist Year) if mentioned.
-    4. Removes silences > 0.3s and stutters from every file.
+    4. Removes silences > 0.2s and stutters from every file.
     5. Stitches all clips into A SINGLE MASTER OUTPUT VIDEO ('RAW_VDO_COMBINED.mp4').
     6. Moves processed raw files to Z:\AI\EDIT AI\RW\processed and records SHA-256 hashes.
     """
@@ -437,6 +447,7 @@ def process_all_raw_videos_as_single_master(raw_video_paths, force_reprocess=Fal
     
     print(f"\n=======================================================")
     print(f"🎬 Processing {len(raw_video_paths)} RAW Videos into RAW_VDO_COMBINED.mp4")
+    print(f"   [Pattern Learned 100% from CapCut Project '0802 (2)']")
     print(f"=======================================================\n")
     
     import whisper
@@ -444,8 +455,10 @@ def process_all_raw_videos_as_single_master(raw_video_paths, force_reprocess=Fal
     model = whisper.load_model(WHISPER_MODEL_NAME)
     
     feedback = line_bot_manager.load_user_feedback()
-    silence_thresh = float(feedback.get("silence_threshold", 0.3))
-    zoom_perc = int(feedback.get("zoom_percentage", 108))  # Default 108% natural zoom
+    silence_thresh = float(feedback.get("silence_threshold", 0.2))
+    pad_start = float(feedback.get("padding_start", 0.02))
+    pad_end = float(feedback.get("padding_end", 0.05))
+    zoom_perc = int(feedback.get("zoom_percentage", 108))
     
     processed_video_items = []
     
@@ -474,8 +487,8 @@ def process_all_raw_videos_as_single_master(raw_video_paths, force_reprocess=Fal
         buddhist_year = extract_buddhist_year(segments)
         creation_time = os.path.getmtime(vpath)
         
-        speech_intervals = get_speech_intervals(segments, duration, merge_threshold=silence_thresh)
-        print(f"Extracted {len(speech_intervals)} non-silent speech blocks.")
+        speech_intervals = get_speech_intervals(segments, duration, padding_start=pad_start, padding_end=pad_end, merge_threshold=silence_thresh)
+        print(f"Extracted {len(speech_intervals)} non-silent speech blocks (Silence threshold: {silence_thresh}s).")
         
         if speech_intervals:
             processed_video_items.append({
@@ -586,11 +599,10 @@ def get_target_raw_video_files():
 
 def watch_folder():
     """Watches the input directory for video files and processes them as a Single Master Video."""
-    print(f"Starting Video-AutoCutter-Agent v5.1 (Natural 108% Punch-in/Punch-out Zoom Mode)...")
+    print(f"Starting Video-AutoCutter-Agent v5.2 (100% CapCut '0802 (2)' Pattern Match)...")
     print(f"Input Watch Folder: {INPUT_DIR}")
     print(f"Output Master Target: {os.path.join(OUTPUT_DIR, 'RAW_VDO_COMBINED.mp4')}")
-    print(f"Natural Zoom Scale: ~108% (Punch-in / Punch-out)")
-    print(f"Silence Cut Threshold: > 0.3s")
+    print(f"Silence Threshold: 0.20s | Padding: 0.02s/0.05s | Natural Zoom: ~108%")
     
     while True:
         raw_videos = get_target_raw_video_files()
