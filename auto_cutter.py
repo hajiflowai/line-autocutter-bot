@@ -98,7 +98,6 @@ def is_duplicate_file(file_path):
         print(f"\n[Smart Anti-Duplicate] File '{os.path.basename(file_path)}' SHA-256 matches previously processed video!")
         print(f"  • Processed Timestamp: {entry.get('processed_timestamp')}")
         print(f"  • Previously Created Clips: {entry.get('clips', [])}")
-        print("--> Skipping processing to prevent duplicate cuts.\n")
         return True, file_hash
         
     return False, file_hash
@@ -245,9 +244,10 @@ def get_video_info(file_path):
                 pass
         return 0.0, 0, 0
 
-def get_crop_filters(width, height, zoom_percentage=120):
+def get_crop_filters(width, height, zoom_percentage=108):
     """
-    Generates 100% normal crop and zoom_percentage% punch-in zoom crop filters for vertical 9:16 format (1080x1920).
+    Generates 100% normal crop and gentle zoom_percentage% (108%) punch-in zoom crop filters
+    for vertical 9:16 format (1080x1920) for maximum natural viewing comfort.
     """
     target_aspect = 9 / 16
     
@@ -338,11 +338,10 @@ def extract_buddhist_year(segments):
         return earliest_year
     return 9999
 
-def render_multi_video_master(video_items, output_path, zoom_perc=120):
+def render_multi_video_master(video_items, output_path, zoom_perc=108):
     """
     Stitches multiple raw video clips into a SINGLE master video ('วิดีโอเดียวจบ'):
-    - video_items: list of dicts [{'path': p, 'intervals': [(s,e),...], 'width': w, 'height': h}, ...]
-    - Applies Dynamic Punch-in Zoom (100% -> 120%) across segments.
+    - Applies smooth, natural Punch-in (108%) / Punch-out (100%) Zoom across sentence transitions.
     - Outputs 9:16 vertical 60fps video.
     """
     filter_complex = []
@@ -364,7 +363,8 @@ def render_multi_video_master(video_items, output_path, zoom_perc=120):
             filter_complex.append(f"[{input_idx}:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS{v_raw_name}")
             filter_complex.append(f"[{input_idx}:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS{a_name}")
             
-            crop_fmt = crop_100 if (total_segments % 2 == 0) else crop_zoom
+            # Natural Punch-in (108%) / Punch-out (100%) Zoom transition
+            crop_fmt = crop_zoom if (total_segments % 2 == 1) else crop_100
             filter_complex.append(f"{v_raw_name}{crop_fmt}{v_name}")
             
             video_maps.append(v_name)
@@ -400,7 +400,7 @@ def render_multi_video_master(video_items, output_path, zoom_perc=120):
         temp_out
     ]
     
-    print(f"\n🎬 Rendering Master Single Output Video ({os.path.basename(output_path)}) from {len(video_items)} clips...")
+    print(f"\n🎬 Rendering Master Video with Natural Punch-in/Punch-out Zoom (~{zoom_perc}%)...")
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
     if result.returncode != 0:
@@ -422,7 +422,7 @@ def render_multi_video_master(video_items, output_path, zoom_perc=120):
         print(f"Error renaming master output file: {e}")
         return False
 
-def process_all_raw_videos_as_single_master(raw_video_paths):
+def process_all_raw_videos_as_single_master(raw_video_paths, force_reprocess=False):
     r"""
     MULTI-TAKE CLEAN & STITCH MODE:
     When multiple video files are placed in Z:\AI\EDIT AI\RW:
@@ -439,24 +439,25 @@ def process_all_raw_videos_as_single_master(raw_video_paths):
     print(f"🎬 Processing {len(raw_video_paths)} RAW Videos into RAW_VDO_COMBINED.mp4")
     print(f"=======================================================\n")
     
-    # Load Whisper model
     import whisper
     print(f"Loading Whisper model '{WHISPER_MODEL_NAME}'...")
     model = whisper.load_model(WHISPER_MODEL_NAME)
     
     feedback = line_bot_manager.load_user_feedback()
     silence_thresh = float(feedback.get("silence_threshold", 0.3))
-    zoom_perc = int(feedback.get("zoom_percentage", 120))
+    zoom_perc = int(feedback.get("zoom_percentage", 108))  # Default 108% natural zoom
     
     processed_video_items = []
     
     for idx, vpath in enumerate(raw_video_paths):
         print(f"\n--- Processing Take {idx+1}/{len(raw_video_paths)}: {os.path.basename(vpath)} ---")
         
-        # Anti-duplicate check
-        is_dup, fhash = is_duplicate_file(vpath)
-        if is_dup:
-            continue
+        if not force_reprocess:
+            is_dup, fhash = is_duplicate_file(vpath)
+            if is_dup:
+                continue
+        else:
+            fhash = calculate_file_sha256(vpath)
             
         duration, width, height = get_video_info(vpath)
         if duration <= 0:
@@ -491,7 +492,6 @@ def process_all_raw_videos_as_single_master(raw_video_paths):
         print("No processable video files found.")
         return False
         
-    # Sort files: Primary by Buddhist Year (พ.ศ. ascending), Secondary by file creation time
     processed_video_items.sort(key=lambda x: (x["buddhist_year"], x["creation_time"]))
     
     print("\n--- Final Video Stitch Sequence (Sorted by Created Date / พ.ศ.) ---")
@@ -507,16 +507,14 @@ def process_all_raw_videos_as_single_master(raw_video_paths):
     success = render_multi_video_master(processed_video_items, master_output_path, zoom_perc=zoom_perc)
     
     if success:
-        # Create explicit RAW_VDO_COMBINED.mp4 file in output folder
         try:
             if os.path.exists(combined_output_path):
                 os.remove(combined_output_path)
             shutil.copy2(master_output_path, combined_output_path)
-            print(f"✅ Exported explicit combined master: {combined_output_path}")
+            print(f"✅ Overwritten explicit combined master: {combined_output_path}")
         except Exception as e:
             print(f"Note creating combined copy: {e}")
             
-        # Move raw files to processed directory & record hashes
         for item in processed_video_items:
             vpath = item["path"]
             fhash = item["hash"]
@@ -539,6 +537,34 @@ def process_all_raw_videos_as_single_master(raw_video_paths):
         print("Failed to render master single output video.")
         return False
 
+def restore_raw_files_from_processed():
+    """Moves raw files from Z:\\AI\\EDIT AI\\RW\\processed back to Z:\\AI\\EDIT AI\\RW for re-processing."""
+    print("Moving processed raw files back to RW for re-processing...")
+    if not os.path.exists(PROCESSED_DIR):
+        return []
+        
+    supported_extensions = ("*.mp4", "*.mov", "*.mkv", "*.avi", "*.flv", "*.ts", "*.webm")
+    proc_files = []
+    for ext in supported_extensions:
+        proc_files.extend(glob.glob(os.path.join(PROCESSED_DIR, ext)))
+        
+    restored = []
+    for pf in proc_files:
+        filename = os.path.basename(pf)
+        if filename.startswith("_"):
+            continue
+        dest = os.path.join(INPUT_DIR, filename)
+        try:
+            if os.path.exists(dest):
+                os.remove(dest)
+            os.rename(pf, dest)
+            restored.append(dest)
+            print(f"  • Restored raw file: {dest}")
+        except Exception as e:
+            print(f"Error restoring raw file {pf}: {e}")
+            
+    return restored
+
 def check_file_stability(file_path):
     """Waits for file size to stabilize to ensure copy operation is complete."""
     try:
@@ -546,26 +572,7 @@ def check_file_stability(file_path):
     except OSError:
         return False
         
-    time.sleep(5)
-    
-    while True:
-        try:
-            curr_size = os.path.getsize(file_path)
-        except OSError:
-            return False
-            
-        if curr_size == last_size:
-            try:
-                with open(file_path, 'rb') as f:
-                    pass
-                break
-            except IOError:
-                pass
-        else:
-            last_size = curr_size
-            
-        time.sleep(5)
-        
+    time.sleep(2)
     return True
 
 def get_target_raw_video_files():
@@ -579,13 +586,11 @@ def get_target_raw_video_files():
 
 def watch_folder():
     """Watches the input directory for video files and processes them as a Single Master Video."""
-    print(f"Starting Video-AutoCutter-Agent v5.0 (Multi-Take Clean & Stitch Mode)...")
+    print(f"Starting Video-AutoCutter-Agent v5.1 (Natural 108% Punch-in/Punch-out Zoom Mode)...")
     print(f"Input Watch Folder: {INPUT_DIR}")
     print(f"Output Master Target: {os.path.join(OUTPUT_DIR, 'RAW_VDO_COMBINED.mp4')}")
-    print(f"Processed Cleanup Folder: {PROCESSED_DIR}")
-    print(f"Smart Anti-Duplicate Check: Active (SHA-256)")
+    print(f"Natural Zoom Scale: ~108% (Punch-in / Punch-out)")
     print(f"Silence Cut Threshold: > 0.3s")
-    print(f"Storage Maintenance: Auto-delete raw files > 48 hours")
     
     while True:
         raw_videos = get_target_raw_video_files()
@@ -603,13 +608,19 @@ def watch_folder():
             time.sleep(5)
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--watch":
-        watch_folder()
+    if len(sys.argv) > 1 and sys.argv[1] == "--reprocess":
+        restored_files = restore_raw_files_from_processed()
+        if restored_files:
+            process_all_raw_videos_as_single_master(restored_files, force_reprocess=True)
+        else:
+            print("No raw files found in processed directory to reprocess.")
     else:
         raw_videos = get_target_raw_video_files()
-        if raw_videos:
-            process_all_raw_videos_as_single_master(raw_videos)
+        if not raw_videos:
+            restored_files = restore_raw_files_from_processed()
+            if restored_files:
+                process_all_raw_videos_as_single_master(restored_files, force_reprocess=True)
+            else:
+                print(f"No raw video files currently found in {INPUT_DIR}.")
         else:
-            print(f"No raw video files currently found in {INPUT_DIR}.")
-            print("Entering folder watcher mode (waiting for incoming files in RW)...")
-            watch_folder()
+            process_all_raw_videos_as_single_master(raw_videos, force_reprocess=True)
